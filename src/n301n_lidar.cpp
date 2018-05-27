@@ -1,19 +1,57 @@
 #include "n301n_lidar.h"
+#include <sensor_msgs/LaserScan.h>
+#include <boost/asio.hpp>
+#include <std_msgs/UInt16.h>
 
+int angle_disable_min, angle_disable_max;
 namespace n301_lidar_driver {
-n301n_lidar::n301n_lidar(const std::string& port, uint32_t baud_rate, boost::asio::io_service& io)
-    :port_(port), baud_rate_(baud_rate), shutting_down_(false), serial_(io, port_)
-{
-    serial_.set_option(boost::asio::serial_port_base::baud_rate(baud_rate_));
+
+n301n_lidar::n301n_lidar()
+    :shutting_down_(false)
+{   
+    // ROS_INFO("construct");
+    ros::NodeHandle priv_nh("~");
+
+    std_msgs::UInt16 rpms;
+
+    priv_nh.param("port", port_, std::string("/dev/ttyUSB0"));
+    priv_nh.param("baud_rate", baud_rate_, 230400);
+    priv_nh.param("frame_id", frame_id_, std::string("laser_link"));
+    priv_nh.param("duration", duration_, 1.0);
+    priv_nh.param("max_range", max_range_, 10.0);
+    priv_nh.param("min_range", min_range_, 0.06);
+    priv_nh.param("angle_disable_min", angle_disable_min, -1);
+    priv_nh.param("angle_disable_max", angle_disable_max, -1);
+
+
+    boost::asio::io_service io;
+    try{
+    serial_ = new boost::asio::serial_port(io, port_);
+    serial_->set_option(boost::asio::serial_port_base::baud_rate(baud_rate_));
+    // ROS_INFO("baud_rate = %d", baud_rate_);
+    }
+    catch (boost::system::system_error ex){
+        ROS_ERROR("Error instantiating laser object. Are you sure you have the correct port %s and baud rate %d? Error was %s"
+                    , port_.c_str(), baud_rate_, ex.what());
+    }
+    ros::NodeHandle nh;
+    laser_pub_ = nh.advertise<sensor_msgs::LaserScan>("scan", 1000);
+    motor_pub_ = nh.advertise<std_msgs::UInt16>("rpms", 1000);
+
+    ros::Timer timer = nh.createTimer(ros::Duration(duration_), &n301n_lidar::checkLaserReceived, this);
+
+    laser_thread_ = new boost::thread(boost::bind(&n301n_lidar::run, this));
+    ros::spin();
 }
 
 n301n_lidar::~n301n_lidar()
 {
-    serial_.close();
+    serial_->close();
 }
 
-void n301n_lidar::poll(sensor_msgs::LaserScan::Ptr scan, int angle_disable_min, int angle_disable_max)
+void n301n_lidar::poll(sensor_msgs::LaserScan::Ptr scan)
 {
+    // ROS_INFO("poll");
     uint8_t temp_char;
     uint8_t start_count = 0;
     bool got_scan = false;
@@ -41,7 +79,8 @@ void n301n_lidar::poll(sensor_msgs::LaserScan::Ptr scan, int angle_disable_min, 
         int index;
         while (!shutting_down_ && !got_scan) {
             // Wait until first data sync of frame: 0xFA, 0xA0
-            boost::asio::read(serial_, boost::asio::buffer(&raw_bytes[start_count],1));
+            boost::asio::read(*serial_, boost::asio::buffer(&raw_bytes[start_count],1));
+            // ROS_INFO("start = 0x%x", raw_bytes[start_count]);
             if(start_count == 0) {
                 if(raw_bytes[start_count] == 0xFA) {
                     start_count = 1;
@@ -53,13 +92,17 @@ void n301n_lidar::poll(sensor_msgs::LaserScan::Ptr scan, int angle_disable_min, 
                     // Now that entire start sequence has been found, read in the rest of the message
                     got_scan = true;
 
-                    boost::asio::read(serial_,boost::asio::buffer(&raw_bytes[2], 1978));
+                    boost::asio::read(*serial_,boost::asio::buffer(&raw_bytes[2], 1978));
 
+                    last_laser_received_ts_ = ros::Time::now();
+                    // ROS_INFO("time = %f", last_laser_received_ts_.toSec());
+                    scan->header.frame_id = frame_id_;
+                    scan->header.stamp = ros::Time::now();
                     scan->angle_min = 0.0;
                     scan->angle_max = 2.0*M_PI;
                     scan->angle_increment = (2.0*M_PI/360.0);
-                    scan->range_min = 0.06;
-                    scan->range_max = 10.0;
+                    scan->range_min = min_range_;
+                    scan->range_max = max_range_;
                     scan->ranges.resize(360);
                     scan->intensities.resize(360);
 
@@ -86,13 +129,14 @@ void n301n_lidar::poll(sensor_msgs::LaserScan::Ptr scan, int angle_disable_min, 
                                 uint16_t range = ((byte1 & 0x3F)<< 8) + byte0;
                                 // Last two bytes represent the uncertanty or intensity, might also be pixel area of target...
                                 uint16_t intensity = (byte3 << 8) + byte2;
+
                                 double dist = range / 1000.0;
                                 if (((359 - index) < angle_disable_max) && ((359-index) > angle_disable_min)  ){
                                     scan->ranges[359 - index] = std::numeric_limits<float>::infinity();
                                 }else{
                                     scan->ranges[359 - index] = ( dist < scan->range_min) ? scan->range_max: dist;
                                 }
-                                scan->intensities[359 - index] = intensity;
+                                scan->intensities[index] = intensity;
                             }
 
 
@@ -130,6 +174,41 @@ uint16_t n301n_lidar::checkSum(const uint8_t *p_byte)
     checksum = checksum & 0x7FFF;
     return checksum;
 }
+
+void n301n_lidar::run()
+{
+    // ROS_INFO("run");
+    // ros::Rate r(10);
+    std_msgs::UInt16 rpms;
+    while (ros::ok())
+    {
+        // ROS_INFO("WHILE");
+        sensor_msgs::LaserScan::Ptr scan(new sensor_msgs::LaserScan);
+        if(scan == NULL)
+            ROS_WARN("SCAN == NULL");
+        
+        poll(scan);
+        
+        laser_pub_.publish(scan);
+        ROS_WARN_ONCE("scan publish data success!");
+
+    }
+}
+
+void n301n_lidar::checkLaserReceived(const ros::TimerEvent &event)
+{
+    //  ROS_INFO("checkLaserReceived");
+     ros::Duration d = ros::Time::now() - last_laser_received_ts_;
+     if( d > ros::Duration(duration_) )
+     {
+
+         ROS_WARN("No laser scan received for %f seconds.  Verify that data is being recieved from serial port",
+                  d.toSec());
+     }
+
+
+}
+
 
 }
 

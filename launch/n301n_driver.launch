@@ -2,8 +2,11 @@
     <node pkg="n301n_lidar_driver" type="n301n_publisher" name="n301n_publisher" output="screen">
     <param name="port" value="/dev/ttyUSB0"/>
     <param name="baud_rate" value="230400"/>
-    <param name="frame_id" value="base_laser_link"/>
-	<param name="angle_disable_min" value="-1"/>
-	<param name="angle_disable_max" value="-1"/>
+    <param name="frame_id" value="laser_link"/>
+    <param name="duration" value="0.5"/>
+    <param name="max_range" value="10.0"/>
+    <param name="min_range" value="0.06"/>
+    <param name="angle_disable_min" value="90"/>
+    <param name="angle_disable_max" value="180"/>
     </node>
 </launch>

@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 2.8.3)
 project(n301n_lidar_driver)
+
 ## Add support for C++11, supported in ROS Kinetic and newer
 # add_definitions(-std=c++11)
 
@@ -180,6 +181,9 @@ install(DIRECTORY include/${PROJECT_NAME}/
     PATTERN ".svn" EXCLUDE
 )
 
+install(DIRECTORY launch
+        DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
 ## Mark other files for installation (e.g. launch and bag files, etc.)
 # install(FILES
 #   # myfile1
